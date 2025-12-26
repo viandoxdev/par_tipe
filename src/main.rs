@@ -167,7 +167,7 @@ fn update_graph(
             commands.entity(entity).despawn();
         }
 
-        let mut graph = Graph::new_random_seeded(seed.0 as u64, size.0 as usize, prob.0);
+        let graph = Graph::new_random_seeded(seed.0 as u64, size.0 as usize, prob.0);
 
         //graph.spectral_layout(scale.0);
 
@@ -178,9 +178,9 @@ fn update_graph(
         commands.spawn((
             graph,
             phys,
-            Visibility::default(),
+            Visibility::Visible,
             GlobalTransform::default(),
-            children![(aco, Transform::default(), Visibility::default())],
+            children![(aco, Transform::default(), Visibility::Visible)],
         ));
     }
 }
@@ -297,7 +297,7 @@ fn setup(mut commands: Commands, window: Single<&Window>, mut gizmo_assets: ResM
     let mut gizmo = GizmoAsset::new();
     let window_size = window.resolution.physical_size().as_vec2();
 
-    gizmo.grid_3d(Isometry3d::from_translation(Vec3::new(50.0, 50.0, 0.0)), UVec3::splat(99), Vec3::splat(10.0), Color::WHITE);
+    gizmo.grid_3d(Isometry3d::from_translation(Vec3::new(50.0, 50.0, 0.0)), UVec3::splat(10), Vec3::splat(10.0), Color::WHITE);
 
     commands.spawn((Camera2d, IsDefaultUiCamera));
     commands.spawn((
@@ -320,7 +320,7 @@ fn setup(mut commands: Commands, window: Single<&Window>, mut gizmo_assets: ResM
             },
             ..OrthographicProjection::default_3d()
         }),
-        RenderLayers::layer(1),
+        RenderLayers::layer(2),
         Msaa::Sample4,
         PanCam::default(),
     ));
@@ -353,7 +353,7 @@ fn setup(mut commands: Commands, window: Single<&Window>, mut gizmo_assets: ResM
             handle: gizmo_assets.add(gizmo),
             ..default()
         },
-        RenderLayers::layer(1),
+        RenderLayers::layer(2),
     ));
 }
 

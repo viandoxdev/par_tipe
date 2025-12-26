@@ -300,12 +300,15 @@ impl ACO {
                     })
                     .sum::<Vec2>()
                     .to_angle();
-                let color =
-                    bevy::color::Hsva::hsv(hue / f32::consts::PI * 180.0, 1.0, 1.0).to_f32_array();
+                let color = bevy::color::Srgba::from(bevy::color::Hsva::hsv(
+                    hue / f32::consts::PI * 180.0,
+                    1.0,
+                    1.0,
+                ))
+                .to_f32_array();
                 data[index * 4] = (color[0] * 255.0).clamp(0.0, 255.0) as u8;
                 data[index * 4 + 1] = (color[1] * 255.0).clamp(0.0, 255.0) as u8;
                 data[index * 4 + 2] = (color[2] * 255.0).clamp(0.0, 255.0) as u8;
-                data[index * 4 + 3] = (color[3] * 255.0).clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -349,6 +352,7 @@ pub fn spawn_agents(
     ));
 
     for (entity, aco) in query.iter() {
+        info!("Spawning pheromone grid and agents entities");
         let mesh_handle = mesh_handle.clone();
         let material_handle = materials.add(AgentMaterial {
             colony_count: aco.edges.len() as u32,
@@ -363,7 +367,7 @@ pub fn spawn_agents(
         let mut image = Image::new_fill(
             size,
             bevy::render::render_resource::TextureDimension::D2,
-            &[0, 0, 0, 255],
+            &[255, 255, 255, 255],
             bevy::render::render_resource::TextureFormat::Rgba8Unorm,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
@@ -386,14 +390,16 @@ pub fn spawn_agents(
                             aco.state_buffer.angles[index],
                         ))
                         .with_translation(pos.extend(0.0)),
-                        RenderLayers::layer(1),
+                        RenderLayers::layer(2),
+                        Agent,
                     ));
                 }
             }
 
             spawner.spawn((
                 Sprite::from_image(handle.clone()),
-                Transform::from_scale(Vec3::splat(100.0)).with_translation(Vec3::new(0.0, 0.0, 0.0)),
+                Transform::from_scale(Vec3::splat(100.0))
+                    .with_translation(Vec3::new(0.0, 0.0, 0.0)),
                 PheromoneGrid {
                     image_handle: handle,
                 },
