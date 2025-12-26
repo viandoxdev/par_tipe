@@ -1,26 +1,41 @@
 use bevy::{
-    camera::{Viewport, visibility::RenderLayers},
-    color::palettes::tailwind,
-    feathers::{
+    camera::{Viewport, visibility::RenderLayers}, color::palettes::tailwind, feathers::{
         FeathersPlugins,
         controls::{ButtonProps, SliderProps, button, slider},
         dark_theme::create_dark_theme,
         theme::{ThemedText, UiTheme},
-    },
-    input_focus::InputFocus,
-    prelude::*,
-    ui_widgets::{Activate, SliderPrecision, SliderStep, observe, slider_self_update},
-    window::WindowResolution,
+    }, input_focus::InputFocus, prelude::*, ui_widgets::{Activate, SliderPrecision, SliderStep, SliderValue, observe, slider_self_update}, window::{WindowResized, WindowResolution}
 };
+use bevy_pancam::{PanCam, PanCamPlugin};
 use bevy_prototype_lyon::prelude::*;
 use bevy_prototype_lyon::{
     plugin::ShapePlugin,
     shapes::{Circle, Line},
 };
 use itertools::Itertools;
+use nalgebra as na;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
+use crate::ants::AgentMaterial;
+
+mod ants;
+
 #[derive(Component)]
+struct SeedSlider;
+
+#[derive(Component)]
+struct SizeSlider;
+
+#[derive(Component)]
+struct ScaleSlider;
+
+#[derive(Component)]
+struct ProbabilitySlider;
+
+#[derive(Message)]
+struct RestartMessage;
+
+#[derive(Component, Clone)]
 struct Graph {
     nodes: Vec<Vec2>,
     edges: Vec<Vec<usize>>,
@@ -40,8 +55,8 @@ impl GraphPhysics {
 }
 
 impl Graph {
-    const RADIUS: f32 = 5.0;
-    const EDGE_WIDTH: f32 = 1.0;
+    const RADIUS: f32 = 1.0;
+    const EDGE_WIDTH: f32 = 0.2;
 
     fn new_random_seeded(seed: u64, size: usize, p: f32) -> Self {
         let mut rng = SmallRng::seed_from_u64(seed);
@@ -104,6 +119,70 @@ impl Graph {
             ));
         });
     }
+
+    fn spectral_layout(&mut self, scale: f32) {
+        let size = self.nodes.len();
+        let laplace_matrix = na::DMatrix::from_fn(size, size, |i, j| {
+            if i == j {
+                self.edges[i].len() as f32
+            } else if self.edges[i].contains(&j) {
+                -1.0
+            } else {
+                0.0
+            }
+        });
+        let eigen = nalgebra_lapack::SymmetricEigen::new(laplace_matrix.clone_owned());
+        let (_, x_vec, y_vec) = eigen
+            .eigenvectors
+            .column_iter()
+            .map(|c| {
+                let p = laplace_matrix.clone() * c;
+                let value = p.component_div(&c).mean();
+                (value, c)
+            })
+            .k_smallest_by(3, |(a, _), (b, _)| {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(_, c)| c)
+            .collect_tuple()
+            .unwrap();
+
+        for i in 0..size {
+            self.nodes[i] = Vec2::new(x_vec[i] as f32 * scale, y_vec[i] as f32 * scale);
+        }
+    }
+}
+
+fn update_graph(
+    mut commands: Commands,
+    query: Query<Entity, With<Graph>>,
+    seed: Single<&SliderValue, With<SeedSlider>>,
+    size: Single<&SliderValue, With<SizeSlider>>,
+    prob: Single<&SliderValue, With<ProbabilitySlider>>,
+    scale: Single<&SliderValue, With<ScaleSlider>>,
+    mut restart_event_reader: MessageReader<RestartMessage>,
+) {
+    for _ in restart_event_reader.read() {
+        for entity in query {
+            commands.entity(entity).despawn();
+        }
+
+        let mut graph = Graph::new_random_seeded(seed.0 as u64, size.0 as usize, prob.0);
+
+        //graph.spectral_layout(scale.0);
+
+        let phys = GraphPhysics::from_graph(&graph);
+
+        let aco = ants::ACO::from_graph(graph.clone(), seed.0 as u64);
+
+        commands.spawn((
+            graph,
+            phys,
+            Visibility::default(),
+            GlobalTransform::default(),
+            children![(aco, Transform::default(), Visibility::default())],
+        ));
+    }
 }
 
 fn update_graph_meshes(mut commands: Commands, query: Query<(Entity, &Graph), Changed<Graph>>) {
@@ -133,8 +212,8 @@ fn toolbar() -> impl Bundle {
                     (),
                     Spawn((Text::new("button"), ThemedText))
                 ),
-                observe(|_activate: On<Activate>| {
-                    info!("clicked");
+                observe(|_activate: On<Activate>, mut restart_message_writer: MessageWriter<RestartMessage>| {
+                    restart_message_writer.write(RestartMessage);
                 })
             ),
             (
@@ -146,23 +225,113 @@ fn toolbar() -> impl Bundle {
                     },
                     (SliderStep(1.), SliderPrecision(0)),
                 ),
-                observe(slider_self_update)
+                observe(slider_self_update),
+                SeedSlider,
+            ),
+            (
+                slider(
+                    SliderProps {
+                        value: 10.,
+                        min: 0.,
+                        max: 100.,
+                    },
+                    (SliderStep(1.), SliderPrecision(0)),
+                ),
+                observe(slider_self_update),
+                SizeSlider,
+            ),
+            (
+                slider(
+                    SliderProps {
+                        value: 0.5,
+                        min: 0.,
+                        max: 1.,
+                    },
+                    (SliderStep(0.01), SliderPrecision(2)),
+                ),
+                observe(slider_self_update),
+                ProbabilitySlider,
+            ),
+            (
+                slider(
+                    SliderProps {
+                        value: 100.0,
+                        min: 0.,
+                        max: 1000.,
+                    },
+                    (SliderStep(1.0), SliderPrecision(0)),
+                ),
+                observe(slider_self_update),
+                ScaleSlider,
             ),
         ],
     )
 }
 
-fn setup(mut commands: Commands, window: Single<&Window>) {
+fn on_resize(
+    // mut ui_cam: Single<&mut Camera, With<IsDefaultUiCamera>>,
+    mut graph_cams: Query<&mut Camera, With<GraphCamera>>,
+    mut resize_reader: MessageReader<WindowResized>,
+    window: Single<&Window>,
+) {
+    for _ in resize_reader.read() {
+        for mut graph_cam in graph_cams.iter_mut() {
+            graph_cam.viewport = Some(Viewport {
+                physical_size: Vec2::new(
+                    window.resolution.physical_width() as f32 * 0.7,
+                    window.resolution.physical_height() as f32,
+                )
+                .as_uvec2(),
+                physical_position: Vec2::new(window.resolution.physical_width() as f32 * 0.3, 0.0)
+                    .as_uvec2(),
+                ..default()
+            });
+        }
+    }
+}
+
+#[derive(Component)]
+struct GraphCamera;
+
+fn setup(mut commands: Commands, window: Single<&Window>, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
+    let mut gizmo = GizmoAsset::new();
     let window_size = window.resolution.physical_size().as_vec2();
+
+    gizmo.grid_3d(Isometry3d::from_translation(Vec3::new(50.0, 50.0, 0.0)), UVec3::splat(99), Vec3::splat(10.0), Color::WHITE);
 
     commands.spawn((Camera2d, IsDefaultUiCamera));
     commands.spawn((
-        Camera2d,
+        GraphCamera,
+        Camera3d::default(),
         Camera {
             order: 1,
             viewport: Some(Viewport {
-                physical_size: (window_size * 0.7).as_uvec2(),
-                physical_position: (window_size * 0.3).as_uvec2(),
+                physical_size: Vec2::new(window_size.x * 0.7, window_size.y).as_uvec2(),
+                physical_position: Vec2::new(window_size.x * 0.3, 0.0).as_uvec2(),
+                ..default()
+            }),
+            clear_color: ClearColorConfig::Default,
+            ..default()
+        },
+        Transform::from_xyz(50.0, 50., 100.0),
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: bevy::camera::ScalingMode::FixedVertical {
+                viewport_height: 100.0,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        RenderLayers::layer(1),
+        Msaa::Sample4,
+        PanCam::default(),
+    ));
+    commands.spawn((
+        GraphCamera,
+        Camera2d,
+        Camera {
+            order: 2,
+            viewport: Some(Viewport {
+                physical_size: Vec2::new(window_size.x * 0.7, window_size.y).as_uvec2(),
+                physical_position: Vec2::new(window_size.x * 0.3, 0.0).as_uvec2(),
                 ..default()
             }),
             ..default()
@@ -176,18 +345,23 @@ fn setup(mut commands: Commands, window: Single<&Window>) {
         }),
         RenderLayers::layer(1),
         Msaa::Sample4,
+        PanCam::default(),
     ));
     commands.spawn(toolbar());
-    let graph = Graph::new_random_seeded(2, 30, 0.1);
-    let phys = GraphPhysics::from_graph(&graph);
-    commands.spawn((graph, phys, Visibility::default(), GlobalTransform::default()));
+    commands.spawn((
+        Gizmo {
+            handle: gizmo_assets.add(gizmo),
+            ..default()
+        },
+        RenderLayers::layer(1),
+    ));
 }
 
 fn force_based_refine(query: Query<(&mut Graph, &mut GraphPhysics)>) {
-    const LENGTH_SQUARED: f32 = 500.0;
-    const SPRING_STRENGTH: f32 = 0.1;
-    const MAGNET_STRENGTH: f32 = 6000.0;
-    const TIME_STEP: f32 = 0.01;
+    const SPRING_LENGTH: f32 = 500.0;
+    const SPRING_STRENGTH: f32 = 0.01;
+    const MAGNET_STRENGTH: f32 = 0.04;
+    const TIME_STEP: f32 = 0.1;
     const FRICTION: f32 = 0.97;
 
     for (mut graph, mut phys) in query {
@@ -197,16 +371,18 @@ fn force_based_refine(query: Query<(&mut Graph, &mut GraphPhysics)>) {
 
             for v in (0..size).filter(|&v| v != u) {
                 let delta = graph.nodes[u] - graph.nodes[v];
-                if delta.length_squared() < 2.0 * Graph::RADIUS * Graph::RADIUS {
-                    forces += delta.normalize() * MAGNET_STRENGTH;
-                }
-                // forces += delta.normalize() * (MAGNET_STRENGTH * Graph::RADIUS / delta.length_squared());
+                forces += delta.normalize()
+                    * (1.0
+                        / (MAGNET_STRENGTH
+                            * (delta.length_squared() - 2.0 * Graph::RADIUS * Graph::RADIUS))
+                        - 1.0)
+                        .clamp(0.0, 100.0)
             }
 
             for &v in &graph.edges[u] {
                 let delta = graph.nodes[v] - graph.nodes[u];
-                forces +=
-                    delta.normalize() * SPRING_STRENGTH * (delta.length_squared() - LENGTH_SQUARED)
+                forces -=
+                    delta.normalize() * SPRING_STRENGTH * (SPRING_LENGTH - delta.length_squared());
             }
 
             *vel += forces * TIME_STEP;
@@ -228,11 +404,27 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((FeathersPlugins, ShapePlugin))
+        .add_plugins((
+            FeathersPlugins,
+            ShapePlugin,
+            PanCamPlugin,
+            MaterialPlugin::<AgentMaterial>::default(),
+        ))
+        .add_message::<RestartMessage>()
         .insert_resource(UiTheme(create_dark_theme()))
         .init_resource::<InputFocus>()
         .add_systems(Startup, setup)
-        .add_systems(Update, update_graph_meshes)
-        .add_systems(FixedUpdate, force_based_refine)
+        .add_systems(
+            Update,
+            (
+                update_graph_meshes,
+                on_resize,
+                update_graph,
+                ants::spawn_agents,
+                ants::update_agents,
+            ),
+        )
+        // .add_systems(FixedUpdate, force_based_refine)
+        .add_systems(FixedUpdate, ants::update_acos)
         .run();
 }
